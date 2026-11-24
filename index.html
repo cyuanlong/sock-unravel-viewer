@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>复旦袜抽丝查看</title>
+<style>
+:root{--bg:#25272b;--panel:#f7f6f2;--ink:#222428;--muted:#686c74;--line:#d9d7d0;--accent:#1f4fa8}
+*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+#app{display:flex;height:100%}#view{position:relative;flex:1;min-width:0}canvas{display:block;width:100%;height:100%;cursor:grab;touch-action:none}canvas:active{cursor:grabbing}
+aside{width:320px;flex:none;background:var(--panel);padding:18px;overflow:auto}h1{font-size:18px;margin:0 0 4px}.sub{color:var(--muted);font-size:12.5px;margin:0 0 16px}
+label{display:block;font-weight:600;margin:14px 0 6px}input[type=range]{width:100%;accent-color:var(--accent)}select,button{font:inherit;min-height:34px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);padding:4px 10px}select{width:100%}
+.row{display:flex;gap:8px;margin-top:8px}.row button{flex:1}button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+dl{display:grid;grid-template-columns:82px 1fr;gap:5px 8px;margin:14px 0 0;padding-top:12px;border-top:1px solid var(--line)}dt{color:var(--muted)}dd{margin:0;font-variant-numeric:tabular-nums}
+.hint{color:var(--muted);font-size:12px;margin-top:14px}#load{position:absolute;inset:0;display:grid;place-items:center;color:#ddd}
+@media(max-width:720px){#app{flex-direction:column}#view{height:56%;flex:none}aside{width:100%;flex:1}}
+</style>
+<div id="app">
+<div id="view"><canvas id="c"></canvas><div id="load">正在读取纱线…</div></div>
+<aside>
+<h1>复旦袜抽丝查看</h1>
+<p class="sub" id="sum"></p>
+<label for="p">抽出进度</label>
+<input id="p" type="range" min="0" value="0" step="1">
+<div class="row"><button id="play" class="primary">开始抽丝</button><button id="back">退一针</button><button id="next">进一针</button></div>
+<div class="row"><button id="reset">复原袜子</button><button id="view0">复位视角</button></div>
+<label for="y">查看一根纱</label>
+<select id="y"><option value="-1">全部纱线</option></select>
+<dl>
+<dt>正在退出</dt><dd id="i-y">—</dd><dt>部位</dt><dd id="i-s">—</dd><dt>圈 / 针</dt><dd id="i-c">—</dd><dt>已退线圈</dt><dd id="i-l">0</dd><dt>这根纱</dt><dd id="i-m">—</dd>
+</dl>
+<p class="hint">拖动旋转，滚轮缩放，按住 Shift 拖动平移。先拆缝合线，再按编织的相反顺序逐针退圈。</p>
+</aside>
+</div>
+<script>
+const SEC={welt_inner:'袜口内层',welt:'袜口',leg:'袜筒',heel:'袜跟',foot:'袜底',toe:'袜头'};
+const $=id=>document.getElementById(id), cv=$('c'), gl=cv.getContext('webgl2',{antialias:true,preserveDrawingBuffer:true});
+let M,D,steps=0,cur=0,only=-1,playing=false,yaw=-0.7,pitch=0.25,dist=2.6,pan=[0,0],idxCount=0,prog,pl,tipBuf,U={},UL={};
+function sh(t,s){const o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);if(!gl.getShaderParameter(o,gl.COMPILE_STATUS))throw gl.getShaderInfoLog(o);return o}
+function pg(v,f){const p=gl.createProgram();gl.attachShader(p,sh(gl.VERTEX_SHADER,v));gl.attachShader(p,sh(gl.FRAGMENT_SHADER,f));gl.linkProgram(p);return p}
+const VS=`#version 300 es
+precision highp float;in vec3 aP;in vec3 aN;in uint aC;in uint aY;in uint aS;uniform mat4 uM;uniform uint uStep;uniform int uOnly;uniform vec3 uCol[8];out vec3 vC;out float vG;out float vD;
+void main(){gl_Position=uM*vec4(aP,1.);float l=.62+.38*abs(dot(normalize(aN),normalize(vec3(.35,.8,.5))));vC=uCol[int(aC)]*l;vG=aS<uStep?1.:0.;vD=(uOnly>=0&&int(aY)!=uOnly)?1.:0.;}`;
+const FS=`#version 300 es
+precision highp float;in vec3 vC;in float vG;in float vD;out vec4 o;void main(){if(vG>.5)discard;if(vD>.5){if(mod(gl_FragCoord.x+gl_FragCoord.y,5.)>1.)discard;o=vec4(vec3(.42),1.);return;}o=vec4(vC,1.);}`;
+const VL=`#version 300 es
+precision highp float;in vec3 aP;uniform mat4 uM;void main(){gl_Position=uM*vec4(aP,1.);}`;
+const FL=`#version 300 es
+precision highp float;uniform vec3 uC;out vec4 o;void main(){o=vec4(uC,1.);}`;
+function mat(){const a=cv.width/cv.height,f=1/Math.tan(.42),n=.05,r=30,cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);
+ const V=[cy,sy*sp,-sy*cp,0, 0,cp,sp,0, sy,-cy*sp,cy*cp,0, pan[0],pan[1],-dist,1],Pm=[f/a,0,0,0,0,f,0,0,0,0,(r+n)/(n-r),-1,0,0,2*r*n/(n-r),0],o=new Float32Array(16);
+ for(let i=0;i<4;i++)for(let j=0;j<4;j++){let s=0;for(let k=0;k<4;k++)s+=Pm[i+k*4]*V[k+j*4];o[i+j*4]=s}return o}
+function size(){const r=cv.getBoundingClientRect(),d=Math.min(devicePixelRatio||1,2),w=Math.round(r.width*d),h=Math.round(r.height*d);if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h}}
+function pull(){if(cur>=steps)return new Float32Array(0);const q=D.tip[cur]*3,t=[D.pos[q]/32767,D.pos[q+1]/32767,D.pos[q+2]/32767],L=Math.hypot(...t)||1,e=[t[0]/L*1.32+.08,t[1]/L*1.32+.18,t[2]/L*1.32],n=48,a=new Float32Array((n+1)*3);
+ for(let i=0;i<=n;i++){const u=i/n,w=Math.sin(u*Math.PI*9)*.012*u;a[i*3]=t[0]+(e[0]-t[0])*u+w;a[i*3+1]=t[1]+(e[1]-t[1])*u+.05*Math.sin(u*Math.PI);a[i*3+2]=t[2]+(e[2]-t[2])*u-w}return a}
+function draw(){size();gl.viewport(0,0,cv.width,cv.height);gl.clearColor(.145,.153,.169,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);const m=mat();gl.useProgram(prog);gl.uniformMatrix4fv(UL.M,false,m);gl.uniform1ui(UL.S,cur);gl.uniform1i(UL.O,only);gl.bindVertexArray(U.v);gl.drawElements(gl.LINE_STRIP,idxCount,gl.UNSIGNED_INT,0);
+ if(cur>0&&cur<steps){const a=pull();gl.useProgram(pl);gl.uniformMatrix4fv(gl.getUniformLocation(pl,'uM'),false,m);const y=M.pieces[D.sp[cur]],c=M.ycolors[y.role==='link'?0:yarnCol(D.sp[cur])];gl.uniform3f(gl.getUniformLocation(pl,'uC'),c[0],c[1],c[2]);gl.bindVertexArray(U.t);gl.bindBuffer(gl.ARRAY_BUFFER,tipBuf);gl.bufferData(gl.ARRAY_BUFFER,a,gl.DYNAMIC_DRAW);gl.drawArrays(gl.LINE_STRIP,0,a.length/3)}}
+function yarnCol(p){const o=D.off[p];return D.col[o]}
+function info(){const k=Math.min(cur,steps-1),p=M.pieces[D.sp[k]],c=D.sc[k],n=D.sn[k];$('p').value=cur;$('i-y').textContent=cur>=steps?'已全部拆完':p.name;$('i-s').textContent=c<0?'袜头缝合':SEC[M.sections[c]]||'—';$('i-c').textContent=c<0?'—':`第 ${c+1} 圈 / 第 ${n+1} 针`;$('i-l').textContent=`${D.sl[Math.min(cur,steps-1)].toLocaleString()} / ${M.loops.toLocaleString()}`;const s=only>=0?M.pieces[only]:p;$('i-m').textContent=`${s.name}，${s.m.toFixed(1)} 米`;draw()}
+function set(v){cur=Math.max(0,Math.min(steps,Math.round(v)));info()}
+function tick(){if(!playing)return;set(cur+Math.max(8,Math.round(steps/2600)));if(cur>=steps){playing=false;$('play').textContent='开始抽丝'}else requestAnimationFrame(tick)}
+async function main(){if(!gl){$('load').textContent='浏览器不支持 WebGL2';return}
+ M=await (await fetch('meta.json')).json();const tx=await Promise.all(M.parts.map(async f=>{const r=await fetch(f);if(!r.ok)throw new Error(f);return r.text()})),zs=tx.map(x=>Uint8Array.from(atob(x),c=>c.charCodeAt(0))),b=await new Response(new Blob(zs).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();let o=0;const take=(T,n)=>{const a=new T(b,o,n);o+=a.byteLength;o=(o+3)&~3;return a},n=M.points;steps=M.steps;
+ D={pos:take(Int16Array,n*3),nr:take(Int8Array,n*3),col:take(Uint8Array,n),pid:take(Uint8Array,n),stp:take(Uint32Array,n),off:take(Uint32Array,M.yarns+1),tip:take(Uint32Array,steps),sc:take(Int16Array,steps),sn:take(Int16Array,steps),sp:take(Uint8Array,steps),sl:take(Uint32Array,steps)};
+ prog=pg(VS,FS);pl=pg(VL,FL);gl.enable(gl.DEPTH_TEST);UL={M:gl.getUniformLocation(prog,'uM'),S:gl.getUniformLocation(prog,'uStep'),O:gl.getUniformLocation(prog,'uOnly')};gl.useProgram(prog);const cc=new Float32Array(24);M.ycolors.slice(0,8).forEach((c,i)=>cc.set(c,i*3));gl.uniform3fv(gl.getUniformLocation(prog,'uCol'),cc);
+ U.v=gl.createVertexArray();gl.bindVertexArray(U.v);const at=(nm,data,size,type,norm,int)=>{const l=gl.getAttribLocation(prog,nm),bb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,bb);gl.bufferData(gl.ARRAY_BUFFER,data,gl.STATIC_DRAW);gl.enableVertexAttribArray(l);int?gl.vertexAttribIPointer(l,size,type,0,0):gl.vertexAttribPointer(l,size,type,norm,0,0)};
+ at('aP',D.pos,3,gl.SHORT,true);at('aN',D.nr,3,gl.BYTE,true);at('aC',D.col,1,gl.UNSIGNED_BYTE,false,true);at('aY',D.pid,1,gl.UNSIGNED_BYTE,false,true);at('aS',D.stp,1,gl.UNSIGNED_INT,false,true);
+ idxCount=n+M.yarns;const ix=new Uint32Array(idxCount);let w=0;for(let y=0;y<M.yarns;y++){for(let i=D.off[y];i<D.off[y+1];i++)ix[w++]=i;ix[w++]=0xFFFFFFFF}const eb=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,eb);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,ix,gl.STATIC_DRAW);
+ U.t=gl.createVertexArray();gl.bindVertexArray(U.t);tipBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,tipBuf);const lp=gl.getAttribLocation(pl,'aP');gl.enableVertexAttribArray(lp);gl.vertexAttribPointer(lp,3,gl.FLOAT,false,0,0);
+ $('p').max=steps;$('sum').textContent=`${M.yarns} 根连续纱线，${M.loops.toLocaleString()} 个线圈`;M.pieces.forEach(p=>{const e=document.createElement('option');e.value=p.id;e.textContent=p.role==='link'?`${p.name}（${p.m.toFixed(1)} 米）`:`${p.name}：第 ${p.a+1}–${p.b+1} 圈（${p.m.toFixed(1)} 米）`;$('y').append(e)});$('load').remove();info();
+ $('p').oninput=e=>set(+e.target.value);$('next').onclick=()=>set(cur+1);$('back').onclick=()=>set(cur-1);$('reset').onclick=()=>{playing=false;$('play').textContent='开始抽丝';set(0)};$('view0').onclick=()=>{yaw=-.7;pitch=.25;dist=2.6;pan=[0,0];draw()};$('y').onchange=e=>{only=+e.target.value;info()};
+ $('play').onclick=()=>{playing=!playing;$('play').textContent=playing?'暂停':'继续抽丝';if(cur>=steps)cur=0;if(playing)tick()};let dr=null;cv.onpointerdown=e=>{dr=[e.clientX,e.clientY,e.shiftKey];cv.setPointerCapture(e.pointerId)};cv.onpointermove=e=>{if(!dr)return;const dx=e.clientX-dr[0],dy=e.clientY-dr[1];if(dr[2]){pan[0]+=dx*.003*dist/2;pan[1]-=dy*.003*dist/2}else{yaw+=dx*.007;pitch=Math.max(-1.5,Math.min(1.5,pitch+dy*.007))}dr[0]=e.clientX;dr[1]=e.clientY;draw()};cv.onpointerup=()=>dr=null;cv.onwheel=e=>{e.preventDefault();dist=Math.max(.12,Math.min(8,dist*Math.exp(e.deltaY*.001)));draw()};addEventListener('resize',draw)}
+main().catch(e=>{$('load').textContent='读取失败：'+e});
+</script>
+</html>
